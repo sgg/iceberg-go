@@ -712,20 +712,28 @@ func (s *RollingDataWriterTestSuite) TestPartitionLocProviderPreservesObjectStor
 // TestSortsRowsBeforeWriting exercises the sort-on-write path: the rolling
 // data writer must reorder rows according to the table's default sort order
 // before flushing them to the data file. We use a multi-key order with mixed
-// directions and null placement to cover the full SortField surface.
+// directions and null placement, including a nested source (loc.lat), to cover
+// the full SortField surface. loc.lat is first so a null parent struct sorts
+// last without changing the order of the other rows.
 func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	arrSchema := arrow.NewSchema([]arrow.Field{
 		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
 		{Name: "name", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "loc", Type: arrow.StructOf(
+			arrow.Field{Name: "lat", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		), Nullable: true},
 	}, nil)
 
 	icebergSchema, err := ArrowSchemaToIcebergWithFreshIDs(arrSchema, false)
 	s.Require().NoError(err)
 	idFieldID := icebergSchema.Fields()[0].ID
 	nameFieldID := icebergSchema.Fields()[1].ID
+	latField, ok := icebergSchema.FindFieldByName("loc.lat")
+	s.Require().True(ok)
 
-	// id ASC NULLS LAST, name DESC NULLS FIRST.
+	// loc.lat ASC NULLS LAST, id ASC NULLS LAST, name DESC NULLS FIRST.
 	sortOrder, err := NewSortOrder(1, []SortField{
+		{SourceIDs: []int{latField.ID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast},
 		{SourceIDs: []int{idFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortASC, NullOrder: NullsLast},
 		{SourceIDs: []int{nameFieldID}, Transform: iceberg.IdentityTransform{}, Direction: SortDESC, NullOrder: NullsFirst},
 	})
@@ -757,24 +765,31 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 	factory, err := newWriterFactory(loc, args, metaBuilder, icebergSchema, 1024*1024)
 	s.Require().NoError(err)
 	defer factory.closeAll()
+	s.Equal([]int{2, 0}, factory.sortKeys[0].path, "loc.lat is nested")
 
 	bldr := array.NewRecordBuilder(s.mem, arrSchema)
 	defer bldr.Release()
 	idBldr := bldr.Field(0).(*array.Int32Builder)
 	nameBldr := bldr.Field(1).(*array.StringBuilder)
+	locBldr := bldr.Field(2).(*array.StructBuilder)
+	latBldr := locBldr.FieldBuilder(0).(*array.Int32Builder)
 	type row struct {
-		id   int32
-		idOK bool
-		name string
-		nmOK bool
+		id    int32
+		idOK  bool
+		name  string
+		nmOK  bool
+		locOK bool
 	}
 	rows := []row{
-		{id: 3, idOK: true, name: "c", nmOK: true},
-		{id: 1, idOK: true, name: "b", nmOK: true},
-		{id: 1, idOK: true, name: "a", nmOK: true},
-		{idOK: false, name: "x", nmOK: true},
-		{id: 2, idOK: true, nmOK: false},
-		{id: 1, idOK: true, name: "z", nmOK: true},
+		{id: 3, idOK: true, name: "c", nmOK: true, locOK: true},
+		{id: 1, idOK: true, name: "b", nmOK: true, locOK: true},
+		{id: 1, idOK: true, name: "a", nmOK: true, locOK: true},
+		{idOK: false, name: "x", nmOK: true, locOK: true},
+		{id: 2, idOK: true, nmOK: false, locOK: true},
+		{id: 1, idOK: true, name: "z", nmOK: true, locOK: true},
+		// Null parent with child storage 0: if ancestor nulls were ignored,
+		// lat 0 would sort with the other rows instead of last.
+		{id: 9, idOK: true, name: "m", nmOK: true, locOK: false},
 	}
 	for _, r := range rows {
 		if r.idOK {
@@ -787,6 +802,8 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 		} else {
 			nameBldr.AppendNull()
 		}
+		locBldr.Append(r.locOK)
+		latBldr.Append(0)
 	}
 	record := bldr.NewRecordBatch()
 	defer record.Release()
@@ -840,7 +857,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 		}
 	}
 
-	// Expected order: id ASC NULLS LAST, then name DESC NULLS FIRST.
+	// Expected order: loc.lat ASC NULLS LAST, then id ASC NULLS LAST, then name DESC NULLS FIRST.
 	want := []observed{
 		{id: 1, idOK: true, name: "z", nmOK: true},
 		{id: 1, idOK: true, name: "b", nmOK: true},
@@ -848,6 +865,7 @@ func (s *RollingDataWriterTestSuite) TestSortsRowsBeforeWriting() {
 		{id: 2, idOK: true, nmOK: false},
 		{id: 3, idOK: true, name: "c", nmOK: true},
 		{idOK: false, name: "x", nmOK: true},
+		{id: 9, idOK: true, name: "m", nmOK: true},
 	}
 	s.Equal(want, got)
 }

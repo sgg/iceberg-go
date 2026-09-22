@@ -25,7 +25,7 @@ import (
 	"github.com/apache/iceberg-go"
 )
 
-var resolveSortKeysBenchmarkSink []compute.SortKey
+var resolveSortKeysBenchmarkSink []sortKey
 
 func BenchmarkResolveSortKeys(b *testing.B) {
 	for _, tc := range []struct {
@@ -66,9 +66,15 @@ func BenchmarkResolveSortKeys(b *testing.B) {
 			benchmarkResolveSortKeys(b, order, schema, resolveSortKeys)
 		})
 	})
+
+	b.Run("fields=128/sort-keys=16/nested-leaves", func(b *testing.B) {
+		schema := benchmarkSortKeysSchema(128, true)
+		order := benchmarkNestedLeafSortKeysOrder(schema, 16)
+		benchmarkResolveSortKeys(b, order, schema, resolveSortKeys)
+	})
 }
 
-type resolveSortKeysBenchmarkFunc func(SortOrder, *iceberg.Schema) ([]compute.SortKey, error)
+type resolveSortKeysBenchmarkFunc func(SortOrder, *iceberg.Schema) ([]sortKey, error)
 
 func benchmarkResolveSortKeys(
 	b *testing.B,
@@ -135,14 +141,36 @@ func benchmarkSortKeysOrder(sortFieldCount int) SortOrder {
 	return order
 }
 
+func benchmarkNestedLeafSortKeysOrder(schema *iceberg.Schema, sortFieldCount int) SortOrder {
+	fields := make([]SortField, sortFieldCount)
+	topLevel := schema.Fields()
+	for i := range sortFieldCount {
+		st, ok := topLevel[i].Type.(*iceberg.StructType)
+		if !ok || len(st.FieldList) == 0 {
+			panic(fmt.Sprintf("benchmark nested schema field %d is not a struct with children", i))
+		}
+		fields[i] = SortField{
+			SourceIDs: []int{st.FieldList[0].ID}, Transform: iceberg.IdentityTransform{},
+			Direction: SortASC, NullOrder: NullsLast,
+		}
+	}
+
+	order, err := NewSortOrder(1, fields)
+	if err != nil {
+		panic(err)
+	}
+
+	return order
+}
+
 // resolveSortKeysBefore keeps the previous implementation available for
 // before/after benchmark comparisons from a single checkout.
-func resolveSortKeysBefore(order SortOrder, fileSchema *iceberg.Schema) ([]compute.SortKey, error) {
+func resolveSortKeysBefore(order SortOrder, fileSchema *iceberg.Schema) ([]sortKey, error) {
 	if order.IsUnsorted() {
 		return nil, nil
 	}
 
-	keys := make([]compute.SortKey, 0, order.Len())
+	keys := make([]sortKey, 0, order.Len())
 	for _, field := range order.fields {
 		idx, ok := topLevelFieldIndexBefore(fileSchema, field.SourceID())
 		if !ok {
@@ -150,7 +178,10 @@ func resolveSortKeysBefore(order SortOrder, fileSchema *iceberg.Schema) ([]compu
 				order.OrderID(), field.SourceID())
 		}
 
-		key := compute.SortKey{ColumnIndex: idx, Order: compute.SortOrderAscending, NullPlacement: compute.SortNullsAtEnd}
+		key := sortKey{
+			path:    []int{idx},
+			SortKey: compute.SortKey{ColumnIndex: idx, Order: compute.SortOrderAscending, NullPlacement: compute.SortNullsAtEnd},
+		}
 		if field.Direction == SortDESC {
 			key.Order = compute.SortOrderDescending
 		}

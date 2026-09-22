@@ -75,7 +75,7 @@ type writerFactory struct {
 	format           tblutils.FileFormat
 	content          iceberg.ManifestEntryContent
 	equalityFieldIDs []int
-	sortKeys         []compute.SortKey
+	sortKeys         []sortKey
 
 	// Variant shredding: per-file inference over the first shredBufferRows rows.
 	shredEnabled    bool
@@ -570,7 +570,7 @@ func (r *RollingDataWriter) stream(outputDataFilesCh chan<- iceberg.DataFile) {
 		// per-file: rows are not merged into one globally sorted run across
 		// batches. See resolveSortKeys for the full list of limitations.
 		if len(r.factory.sortKeys) > 0 {
-			sorted, err := compute.SortRecordBatch(r.ctx, converted, r.factory.sortKeys)
+			sorted, err := applySortKeys(r.ctx, converted, r.factory.sortKeys)
 			converted.Release()
 			if err != nil {
 				return err
