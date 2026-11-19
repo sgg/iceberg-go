@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>Catalog and view FileIO may use isolated registries.</strong> Glue, Hadoop, Hive and SQL accept <code>WithIORegistry</code>, as REST already does. <code>hadoop.NewCatalog</code>, <code>sql.NewCatalog</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code> and <code>view.WriteMetadata</code> now take a trailing variadic option. Existing calls still compile. Function values assigned to a type with the old signature need a wrapper that calls the function without options. The default remains the global registry, including for <code>catalog.Load</code>.</p>
+</li>
+<li>
 <p><strong><code>RowDelta.Commit</code> can be called once per builder.</strong> A second <code>Commit</code> on the same <code>RowDelta</code> now returns an error wrapping <code>table.ErrInvalidOperation</code> and stages nothing, even if the first call failed, as <code>RewriteFiles.Commit</code> does. Previously, calling <code>Commit</code> again after a failed first call could succeed, and calling it again after a successful one staged the builder's files a second time. Create a new builder with <code>Transaction.NewRowDelta</code> for each commit.</p>
 </li>
 <li>
@@ -259,6 +262,12 @@
 </li>
 <li>
 <p><strong>Partition specs reject source types a transform cannot handle.</strong> Creating or updating a spec with an incompatible source, such as <code>day(string)</code>, now fails. Writes to existing incompatible specs return <code>ErrInvalidTransform</code> instead of writing null partition values.</p>
+</li>
+<li>
+<p><strong>REST <code>CreateTable</code> validates the partition spec locally.</strong> Invalid specs, including transforms with incompatible source types, return an error matching <code>iceberg.ErrInvalidPartitionSpec</code> before the create request. Previously, the server could return <code>rest.ErrBadRequest</code>.</p>
+</li>
+<li>
+<p><strong>New partition specs reject multiple sources for built-in transforms.</strong> Create-table and add-spec payloads with this shape return <code>ErrInvalidPartitionSpec</code>. Historical metadata with such a field still loads and round-trips, but the field is skipped during partition pruning and residual simplification. Multi-source unknown transforms remain supported.</p>
 </li>
 <li>
 <p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
@@ -312,6 +321,9 @@
 <p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
 </li>
 <li>
+<p><strong>Schema updates assert the last assigned field ID.</strong> When <code>UpdateSchema</code> adds a schema, the commit now also requires the table's <code>last-column-id</code> to match the transaction's base, as Iceberg Java does. A stale writer whose base predates another writer's column additions now fails with <code>table.ErrCommitFailed</code> instead of reusing field IDs. Reload the table and reapply the schema change.</p>
+</li>
+<li>
 <p><strong>Schemas store binary and fixed defaults as hex strings.</strong> <code>NewSchema</code>, <code>NewSchemaWithIdentifiers</code> and <code>UpdateSchema.AddColumn</code> (through <code>Apply()</code>) convert <code>[]byte</code>, <code>BinaryLiteral</code> and <code>FixedLiteral</code> defaults of binary and fixed fields, including fields nested in structs, lists and maps, to the lowercase hex string iceberg-go writes to metadata JSON, so a field read back from a schema holds a <code>string</code> such as <code>&quot;0aff&quot;</code>. Code that type-asserts these defaults to <code>[]byte</code> must decode the string instead, for example with <code>hex.DecodeString</code>. A schema built in process now equals the same schema read from metadata with lowercase hex. <code>Equals</code> compares the strings case-sensitively, and Java writes uppercase hex (see <a href="https://github.com/apache/iceberg/issues/18352">apache/iceberg#18352</a>). The fields and types passed in are not modified.</p>
 </li>
 <li>
@@ -319,6 +331,9 @@
 </li>
 <li>
 <p><strong>Out-of-range nanosecond timestamp strings are rejected.</strong> String literals for <code>timestamp_ns</code> and <code>timestamptz_ns</code> outside the signed 64-bit nanosecond range now fail expression binding with <code>ErrBadCast</code>. Scans and <code>ExpressionEvaluator</code> return the error for these filters instead of comparing a wrapped value.</p>
+</li>
+<li>
+<p><strong><code>VisitBoundPredicateRef</code> is removed.</strong> It was meant only for evaluators inside iceberg-go. Visitors in other modules should call <code>VisitBoundPredicate</code>, which passes <code>VisitIn</code> and <code>VisitNotIn</code> a detached copy of the predicate's literal set, as before.</p>
 </li>
 <li>
 <p><strong>Empty string partition bounds are written as non-null bytes.</strong> New manifests preserve empty string lower and upper bounds, fixing filtered scans on identity partitions. Manifests written before this fix may retain null bounds for an empty string and can continue to skip matching rows until rewritten.</p>
@@ -390,6 +405,9 @@
 <p><strong>Hadoop catalog construction takes a context.</strong> <code>hadoop.NewCatalog(name, warehouse, props)</code> becomes <code>hadoop.NewCatalog(ctx, name, warehouse, props)</code>. The context bounds filesystem setup; the catalog's filesystem keeps its values but not its cancellation.</p>
 </li>
 <li>
+<p><strong>SQL and Hive catalog construction takes a context.</strong> <code>sql.NewCatalog(name, db, dialect, props)</code> becomes <code>sql.NewCatalog(ctx, name, db, dialect, props)</code>, and <code>hive.NewCatalog(props, opts...)</code> becomes <code>hive.NewCatalog(ctx, props, opts...)</code>. The context bounds the SQL table setup queries and is checked before the Hive metastore connect.</p>
+</li>
+<li>
 <p><strong>Config loading reports errors.</strong> <code>config.LoadConfig</code> now returns <code>([]byte, error)</code>, and <code>config.LoadConfigFile</code> is removed; call <code>LoadConfig</code> instead. A missing default <code>~/.iceberg-go.yaml</code> still returns no data and no error.</p>
 </li>
 <li>
@@ -403,6 +421,9 @@
 </li>
 <li>
 <p><strong>Snapshot expiration now tolerates concurrent ref changes.</strong> If a concurrent commit moves a ref that the expiry read, a retry or later <code>Commit</code> replans instead of failing with <code>table.ErrCommitFailed</code>. The committed expiry can differ from <code>Transaction.StagedTable</code>. See <a href="./concurrent-writes.html#snapshot-expiration">Snapshot expiration</a> for cases that now fail with <code>table.ErrTransactionUnusable</code>.</p>
+</li>
+<li>
+<p><strong>Snapshot expiration loads full REST history on demand.</strong> Expiration requests <code>snapshots=all</code> when a REST table was loaded in refs mode, including on commit retries. Use <code>Transaction.ExpireSnapshotsWithContext</code> to control the staging request. Catalogs that only supply refs-only history cannot safely expire snapshots.</p>
 </li>
 <li>
 <p><strong>RowDelta reports a concurrent deletion vector as a commit conflict.</strong> If a concurrent commit adds a deletion vector for a data file that a <code>RowDelta</code> also adds one for, <code>Transaction.Commit</code> now fails with an error matching <code>table.ErrConflictingDeleteFiles</code>, <code>table.ErrCommitFailed</code> and <code>table.ErrTransactionUnusable</code>, and the transaction cannot be committed again. Previously, the error matched none of them and the transaction stayed usable. To resolve the conflict, reload the table and commit a <code>RowDelta</code> that adds one deletion vector merging the positions of both vectors and removes the concurrent one with <code>RemoveDeletes</code>.</p>
@@ -484,6 +505,15 @@
 <p>Relatedly, the previously unexported <code>isGCEnabled</code> is now <code>table.IsGCEnabled</code>, so the new package can gate destructive operations on the <code>gc.enabled</code> table property.</p>
 </li>
 <li>
+<p><strong>Metadata tables moved to <code>table/inspect</code>.</strong> <code>Table.Inspect</code> and <code>InspectTable</code> are removed. Each metadata table is now a free function in the <code>table/inspect</code> package that takes the table as its second argument, matching <code>table/maintenance</code>. For example, <code>tbl.Inspect().Snapshots(ctx)</code> becomes <code>inspect.Snapshots(ctx, tbl)</code>. As with <code>table/maintenance</code>, <code>table/inspect</code> imports <code>table</code>, so <code>table.Table</code> cannot keep a deprecation shim. The following moved from <code>table</code> to <code>table/inspect</code>:</p>
+<ul>
+<li>Functions (now free functions taking the context, <code>*table.Table</code> and options): <code>History</code>, <code>Snapshots</code>, <code>Manifests</code>, <code>Refs</code>, <code>MetadataLogEntries</code>, <code>Entries</code>, <code>AllEntries</code>, <code>Files</code>, <code>DataFiles</code>, <code>DeleteFiles</code>, <code>AllFiles</code>, <code>AllDataFiles</code>, <code>AllDeleteFiles</code>, <code>AllManifests</code>, <code>Partitions</code>, <code>PositionDeletes</code>.</li>
+<li>Schema constructors: <code>HistorySchema</code>, <code>SnapshotsSchema</code>, <code>ManifestsSchema</code>, <code>RefsSchema</code>, <code>MetadataLogEntriesSchema</code>, <code>EntriesSchema</code>, <code>AllEntriesSchema</code>, <code>FilesSchema</code>, <code>DataFilesSchema</code>, <code>DeleteFilesSchema</code>, <code>AllFilesSchema</code>, <code>AllDataFilesSchema</code>, <code>AllDeleteFilesSchema</code>, <code>AllManifestsSchema</code>, <code>PartitionsSchema</code>, <code>PositionDeletesSchema</code>.</li>
+<li>Options: <code>InspectOption</code> is now <code>inspect.Option</code>, and <code>WithInspectAllocator</code> is now <code>inspect.WithAllocator</code>.</li>
+</ul>
+<p><code>DiffSnapshotFiles</code> and <code>ValidateSnapshot</code> stay in <code>table</code> as <code>Table</code> methods: <code>tbl.Inspect().DiffSnapshotFiles(ctx, from, to)</code> becomes <code>tbl.DiffSnapshotFiles(ctx, from, to)</code>, and <code>tbl.Inspect().ValidateSnapshot(ctx, id)</code> becomes <code>tbl.ValidateSnapshot(ctx, id)</code>. <code>ManifestProvider.UniqueManifests</code> is newly exported for the <code>all_*</code> tables.</p>
+</li>
+<li>
 <p><strong>Data-file replacement methods renamed.</strong> Use <code>ReplaceDataFilesByPath</code> for string paths. Use <code>ReplaceDataFiles</code> for prebuilt <code>DataFile</code> values instead of <code>ReplaceDataFilesWithDataFiles</code>.</p>
 </li>
 <li>
@@ -512,6 +542,12 @@
 </li>
 <li>
 <p><strong>Float comparisons against literals beyond the float32 range follow IEEE 754.</strong> On a float32 column, <code>x &lt; 1e100</code> no longer returns NaN, <code>+Inf</code> or NULL rows, and <code>NOT(x &gt; 1e100)</code> no longer returns NULL rows. An infinite literal now binds to a float32 infinity, so <code>x = +Inf</code> matches <code>+Inf</code> rows. Java still folds these comparisons to always true or false, see <a href="https://github.com/apache/iceberg/issues/18700">apache/iceberg#18700</a>.</p>
+</li>
+<li>
+<p><strong>Orphan cleanup refreshes metadata before deletion.</strong> Non-dry-run <code>DeleteOrphanFiles</code> requires a catalog-backed table and refreshes it before planning and again before deleting files. <code>ExecuteOrphanCleanup</code> also refreshes before deleting from a non-empty plan. If a saved plan is stale, refresh or reload the table before planning again. Dry runs still work without a catalog.</p>
+</li>
+<li>
+<p><strong>Position deletes use the data file's partition spec.</strong> After partition spec evolution, <code>Delete</code> on a merge-on-read table wrote v2 position delete files with the current spec instead of the target data file's spec. Scans and re-running <code>Delete</code> on such a table can fail with <code>invalid metadata: position delete file ... uses partition spec N, but data file ... uses partition spec M</code>; some deletes are instead silently missed, so the rows stay visible, and re-running those deletes applies them. New deletes carry the data file's spec. For the mismatch error, remove the delete files whose spec ID differs from their data file's with <code>Transaction.NewRewrite</code> (<code>RewriteFiles.DeleteFile</code>), then re-run those deletes; until then the rows they deleted are visible again.</p>
 </li>
 </ul>
 <h2 id="verifying-and-producing-releases"><a class="header" href="#verifying-and-producing-releases">Verifying and producing releases</a></h2>

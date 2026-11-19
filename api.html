@@ -259,7 +259,7 @@ cat, err := rest.NewCatalog(context.Background(), &quot;rest&quot;, &quot;http:/
 
 db, err := sql.Open(sqliteshim.ShimName, &quot;file:catalog.db&quot;)
 // handle err
-cat, err := sqlcat.NewCatalog(&quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
+cat, err := sqlcat.NewCatalog(context.Background(), &quot;default&quot;, db, sqlcat.SQLite, iceberg.Properties{
     &quot;warehouse&quot;: &quot;file:///tmp/warehouse&quot;,
 })
 </code></pre>
@@ -279,7 +279,7 @@ cat := glue.NewCatalog(glue.WithAWSConfig(awsCfg))
     &quot;github.com/apache/iceberg-go/catalog/hive&quot;
 )
 
-cat, err := hive.NewCatalog(iceberg.Properties{},
+cat, err := hive.NewCatalog(context.Background(), iceberg.Properties{},
     hive.WithURI(&quot;thrift://localhost:9083&quot;),
     hive.WithWarehouse(&quot;s3://my-bucket/warehouse&quot;))
 </code></pre>
@@ -667,9 +667,9 @@ for _, s := range tbl.Metadata().Snapshots() {
 }
 </code></pre>
 <h3 id="comparing-physical-files-between-snapshots-v1-v3"><a class="header" href="#comparing-physical-files-between-snapshots-v1-v3">Comparing physical files between snapshots (v1-v3)</a></h3>
-<p>Use <code>tbl.Inspect().DiffSnapshotFiles</code> to compare the live content files
+<p>Use <code>tbl.DiffSnapshotFiles</code> to compare the live content files
 referenced by two snapshot IDs, including snapshots on different branches:</p>
-<pre><code class="language-go">diff, err := tbl.Inspect().DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
+<pre><code class="language-go">diff, err := tbl.DiffSnapshotFiles(ctx, fromSnapshotID, toSnapshotID)
 if err != nil {
     return err
 }
@@ -749,7 +749,7 @@ err = txn.RollbackToSnapshot(targetSnapshotID)
 <p>Use <code>ValidateSnapshot</code> to inspect a snapshot's manifest list and entries without
 changing table data. This is especially useful for checking imported v1 tables
 before allowing them into production.</p>
-<pre><code class="language-go">report, err := tbl.Inspect().ValidateSnapshot(ctx, snapshotID)
+<pre><code class="language-go">report, err := tbl.ValidateSnapshot(ctx, snapshotID)
 if err != nil {
     return err // I/O failed or the scan was canceled; report may be incomplete.
 }
@@ -868,6 +868,17 @@ if err != nil { /* ... */ }
 
 newTbl, err := txn.Commit(ctx)
 </code></pre>
+<p>Snapshot expiration needs complete ancestry to honor branch retention and snapshot
+references. When a REST table was loaded with <code>snapshot-loading-mode=refs</code>,
+expiration requests <code>snapshots=all</code> for the transaction's metadata revision
+and keeps any updates already staged in the transaction. Use
+<code>Transaction.ExpireSnapshotsWithContext(ctx, ...)</code> to control that request.</p>
+<p>If the catalog cannot supply complete history or the metadata revision has
+changed, staging returns an error matching <code>table.ErrInvalidOperation</code>.
+Reload the table and start a new transaction if the revision changed.
+Commit retries and resumed commits also request full history before replanning
+expiration. If the catalog still returns refs-only history, the commit stops
+before resubmitting and returns an error matching <code>table.ErrTransactionUnusable</code>.</p>
 <p>Pass <code>table.WithPostCommit(true)</code> to delete the unreferenced data and metadata files after the commit lands. The <code>iceberg expire-snapshots</code> CLI command wraps the same operation - see <a href="./cli.html">CLI</a>.</p>
 <h2 id="views"><a class="header" href="#views">Views</a></h2>
 <p>Views are created and loaded through catalogs that support them (REST, Hive, SQL):</p>
@@ -896,6 +907,13 @@ v.Schemas()               // map[int]*iceberg.Schema
 v.Properties()            // iceberg.Properties
 </code></pre>
 <p><code>view.New(ident, meta, metadataLocation)</code> constructs a view from already-loaded metadata; <code>view.NewFromLocation(ctx, ident, metadataLocation, fsysFactory)</code> loads metadata from disk or object storage.</p>
+<p>Pass <code>view.WithIORegistry(registry)</code> to <code>view.CreateView</code>,
+<code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code>, or
+<code>view.WriteMetadata</code> to use isolated FileIO. For <code>view.NewFromLocation</code>,
+pass a filesystem factory from the registry. The IO-properties helpers
+keep filesystem configuration (<code>ioProps</code>) separate from persisted view
+properties (<code>metadataProps</code>). See
+<a href="./configuration.html#file-system-credentials">FileIO configuration</a>.</p>
 <h2 id="iceberg--arrow-types"><a class="header" href="#iceberg--arrow-types">Iceberg ↔ Arrow types</a></h2>
 <p>When iceberg-go converts an Iceberg schema to Arrow (e.g. for the scanner output) or vice versa, the type mapping is:</p>
 <div class="table-wrapper"><table><thead><tr><th>Iceberg type</th><th>Arrow type</th></tr></thead><tbody>
