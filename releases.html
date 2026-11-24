@@ -249,6 +249,9 @@
 <h3 id="unreleased-compatibility-notes"><a class="header" href="#unreleased-compatibility-notes">Unreleased compatibility notes</a></h3>
 <ul>
 <li>
+<p><strong>gocloud types are no longer exposed by <code>blobfs</code> and <code>gcs</code>.</strong> <code>blobfs.New</code> now returns the <code>blobfs.FileIO</code> interface, which lists the iceberg-go io interfaces and <code>io.Closer</code>, instead of a struct that embeds <code>*blob.Bucket</code>. <code>FileIO.NewWriter</code>, <code>blobfs.Writer</code> and <code>gcs.ParseGCSConfig</code> are removed; use <code>Create</code>, or configure GCS through properties. To migrate, replace <code>*blobfs.FileIO</code> with <code>blobfs.FileIO</code> in fields, signatures and <code>var _ X = (*blobfs.FileIO)(nil)</code> assertions, and assert <code>Sys()</code> results to <code>blobfs.FileIO</code> instead of <code>*blobfs.FileIO</code>.</p>
+</li>
+<li>
 <p><strong>Catalog and view FileIO may use isolated registries.</strong> Glue, Hadoop, Hive and SQL accept <code>WithIORegistry</code>, as REST already does. <code>hadoop.NewCatalog</code>, <code>sql.NewCatalog</code>, <code>view.CreateView</code>, <code>view.CreateViewWithIOProperties</code>, <code>view.CreateViewFromVersion</code> and <code>view.WriteMetadata</code> now take a trailing variadic option. Existing calls still compile. Function values assigned to a type with the old signature need a wrapper that calls the function without options. The default remains the global registry, including for <code>catalog.Load</code>.</p>
 </li>
 <li>
@@ -270,6 +273,9 @@
 <p><strong>New partition specs reject multiple sources for built-in transforms.</strong> Create-table and add-spec payloads with this shape return <code>ErrInvalidPartitionSpec</code>. Historical metadata with such a field still loads and round-trips, but the field is skipped during partition pruning and residual simplification. Multi-source unknown transforms remain supported.</p>
 </li>
 <li>
+<p><strong>Unsigned partition values no longer wrap.</strong> Partitioned writes accept the full Arrow <code>uint32</code> range for Iceberg <code>long</code> sources and return <code>iceberg.ErrInvalidArgument</code> when an unsigned value exceeds the destination’s signed range.</p>
+</li>
+<li>
 <p><strong>Invalid name mappings now stop scans and add-files.</strong> Tables with an unparseable <code>schema.name-mapping.default</code> now return <code>ErrInvalidMetadata</code> on scans and add-files instead of ignoring the mapping. Fix the property with a valid mapping or remove it.</p>
 </li>
 <li>
@@ -283,6 +289,9 @@
 </li>
 <li>
 <p><strong>Struct defaults must be empty objects.</strong> Non-null <code>initial-default</code> and <code>write-default</code> values for struct fields must be <code>{}</code>; defaults for nested fields belong on those fields. Tables with populated struct defaults written by older iceberg-go versions still load, but <code>AddSchema</code> validates the entire resulting schema. Any schema update, including one that changes an unrelated column, will fail until the populated default is cleared.</p>
+</li>
+<li>
+<p><strong>Schemas with duplicate field IDs are rejected.</strong> Table and view metadata now fail to load with <code>ErrInvalidSchema</code> if any schema in their history has two fields sharing an ID, including <code>0</code> or <code>-1</code>; Java Iceberg already rejects these. Older releases could write such schemas through SQL <code>CreateView</code>, <code>view.CreateView</code> or <code>view.NewMetadata</code>, or through <code>CommitTable</code> with <code>NewAddSchemaUpdate</code> on non-REST catalogs, when IDs were left unset; these calls, and the new <code>UpdateView</code>, now return <code>ErrInvalidSchema</code> instead. To recover, drop and recreate an affected view. For a table, point the catalog at a copy of the metadata without that schema through an atomic catalog metadata replacement, instead of editing the currently referenced metadata file in place.</p>
 </li>
 <li>
 <p><strong>Sort order replacements reuse orders staged earlier in the same transaction.</strong> If a transaction replaces order A with B and then returns to A, A becomes the default again instead of B. The final update reuses A's ID instead of adding another definition. Reuse of orders from earlier commits was already supported.</p>
@@ -306,6 +315,9 @@
 <p><strong><code>UpdateSchema</code> rejects deleting an identifier field.</strong> <code>DeleteColumn</code> on an identifier column used to succeed and quietly drop the column from the table's identifier fields. Now <code>Apply</code> (and <code>Commit</code>) fails with <code>cannot delete identifier field …</code>, as in Java. Deleting a struct that contains one already failed, and now reports <code>cannot delete field … as it will delete nested identifier field …</code>. To delete the column anyway, also call <code>SetIdentifierField</code> with the identifier fields the schema should keep (for example <code>SetIdentifierField([][]string{})</code> to clear them). This also stops a new column that reuses a deleted identifier column's name from becoming the identifier.</p>
 </li>
 <li>
+<p><strong>Schema updates rewrite the table's name mapping.</strong> When a table has <code>schema.name-mapping.default</code>, every <code>UpdateSchema</code> commit now updates it, as in Java and PyIceberg; before, it changed only when <code>WithNameMapping</code> was passed. Added columns are mapped by name and renamed columns keep their old names, so data files without field IDs resolve them. If a new column reuses a name freed by <code>DeleteColumn</code> or <code>RenameColumn</code>, that name now maps to the new column: in older files without field IDs, the new column reads the values stored under that name, and a renamed column no longer reads them. Tables without the property are unaffected.</p>
+</li>
+<li>
 <p><strong>Schema JSON defaults preserve integer precision.</strong> <code>long</code> defaults now decode as <code>int64</code> instead of <code>float64</code>; non-integral, non-numeric, or out-of-range values now fail to parse. Numeric literals inside object and list defaults decode as <code>json.Number</code> rather than <code>float64</code>.</p>
 </li>
 <li>
@@ -319,6 +331,9 @@
 </li>
 <li>
 <p><strong>Commits retry conflicts by default.</strong> <code>commit.retry.num-retries</code> now defaults to <code>4</code>, as in Java and PyIceberg, so <code>Commit</code> refreshes and replays a conflicting commit up to four times before returning <code>ErrCommitFailed</code>. Set it to <code>0</code> to keep failing on the first conflict. <code>table.CommitNumRetriesDefault</code> changes from <code>0</code> to <code>4</code>.</p>
+</li>
+<li>
+<p><strong>The first <code>Delete</code> on a v3 table upgraded from v2 can fail with <code>ErrCommitFailed</code>.</strong> A merge-on-read <code>Delete</code> that gives a data file its first deletion vector now folds that file's v2 position deletes into the vector, so those deletes no longer reappear after the upgrade, and drops the file-scoped v2 position delete files in the same commit. Like any commit that removes delete files, it is not replayed: if another writer commits first, it returns <code>ErrCommitFailed</code> instead of refreshing and retrying. Reload the table and run the delete again. Partition-scoped position delete files stay in the table.</p>
 </li>
 <li>
 <p><strong>Schema updates assert the last assigned field ID.</strong> When <code>UpdateSchema</code> adds a schema, the commit now also requires the table's <code>last-column-id</code> to match the transaction's base, as Iceberg Java does. A stale writer whose base predates another writer's column additions now fails with <code>table.ErrCommitFailed</code> instead of reusing field IDs. Reload the table and reapply the schema change.</p>
@@ -432,7 +447,13 @@
 <p><strong>Schema JSON constructor uses the Go initialism.</strong> Replace <code>iceberg.NewSchemaFromJsonFields</code> with <code>iceberg.NewSchemaFromJSONFields</code>.</p>
 </li>
 <li>
-<p><strong>AWS identifiers use the Go initialism.</strong> <code>glue.AwsProperties</code>, <code>glue.WithAwsConfig</code> and <code>glue.WithAwsProperties</code> become <code>glue.AWSProperties</code>, <code>glue.WithAWSConfig</code> and <code>glue.WithAWSProperties</code>; <code>sigv4.WithAwsConfig</code> becomes <code>sigv4.WithAWSConfig</code>; <code>utils.WithAwsConfig</code> and <code>utils.GetAwsConfig</code> become <code>utils.WithAWSConfig</code> and <code>utils.GetAWSConfig</code>; and <code>config.CatalogConfig.AwsProfile</code> becomes <code>AWSProfile</code>. The <code>aws-profile</code> YAML key is unchanged.</p>
+<p><strong>AWS identifiers use the Go initialism.</strong> <code>glue.AwsProperties</code>, <code>glue.WithAwsConfig</code> and <code>glue.WithAwsProperties</code> become <code>glue.AWSProperties</code>, <code>glue.WithAWSConfig</code> and <code>glue.WithAWSProperties</code>; <code>sigv4.WithAwsConfig</code> becomes <code>sigv4.WithAWSConfig</code>; and <code>config.CatalogConfig.AwsProfile</code> becomes <code>AWSProfile</code>. The <code>aws-profile</code> YAML key is unchanged.</p>
+</li>
+<li>
+<p><strong><code>utils</code> is now <code>awsconfig</code>.</strong> <code>utils.WithAwsConfig</code> and <code>utils.GetAwsConfig</code> become <code>awsconfig.NewContext</code> and <code>awsconfig.FromContext</code> in <code>github.com/apache/iceberg-go/awsconfig</code>, with the same behavior. The <code>utils</code> package is removed.</p>
+</li>
+<li>
+<p><strong>Remaining exported names use Go initialisms.</strong> <code>table.PropertyUuid</code> and <code>table.PropertyCurrentSnapshotId</code> become <code>table.PropertyUUID</code> and <code>table.PropertyCurrentSnapshotID</code>; <code>table.ReassignedIds</code> becomes <code>table.ReassignedIDs</code>; the <code>table.WriteTask.Uuid</code> field becomes <code>UUID</code>; <code>glue.CatalogIdKey</code> becomes <code>glue.CatalogIDKey</code>; <code>io.ADLSSasTokenPrefix</code> becomes <code>io.ADLSSASTokenPrefix</code>; and <code>rest.Oauth2AuthManager</code> and <code>rest.NewOauth2AuthManager</code> become <code>rest.OAuth2AuthManager</code> and <code>rest.NewOAuth2AuthManager</code>. The property and config key strings are unchanged.</p>
 </li>
 <li>
 <p><strong>KMS factory registration now takes a context.</strong> Change <code>encryption.KMSFactory</code> implementations to accept <code>(context.Context, map[string]string)</code> instead of only properties, and call <code>encryption.LoadKeyManagementClient(ctx, props)</code> instead of <code>LoadKeyManagementClient(props)</code>. The existing global <code>RegisterKMS</code>, <code>UnregisterKMS</code>, and <code>GetRegisteredKMSNames</code> functions still use the default registry; <code>RegisterKMS</code> still panics for invalid registrations. Use <code>encryption.MustRegisterKMS</code> for provider initialization. For isolated registrations, create <code>registry := encryption.NewKMSRegistry()</code> after importing any KMS providers and call <code>registry.Register</code>, <code>registry.Load(ctx, props)</code>, <code>registry.Names</code>, or <code>registry.Unregister</code>. New registries snapshot the global registrations; subsequent changes do not propagate.</p>
@@ -480,10 +501,13 @@
 <p><strong>Catalog identifier helper renamed.</strong> <code>catalog.TableNameFromIdent</code> is removed. Use <code>catalog.ObjectNameFromIdent</code> for tables, views, and functions.</p>
 </li>
 <li>
-<p><strong>Substrait expression conversion no longer takes case sensitivity.</strong> <code>substrait.ConvertExpr(schema, expression, caseSensitive)</code> becomes <code>substrait.ConvertExpr(schema, expression)</code>. Case sensitivity remains part of expression binding.</p>
+<p><strong><code>table/substrait</code> is now internal.</strong> The package moved to <code>table/internal/substrait</code>, so <code>substrait.ConvertExpr</code>, <code>substrait.ConvertSchema</code> and <code>substrait.NewExtensionSet</code> are no longer exported. There is no replacement; scans and deletes still convert filters internally.</p>
 </li>
 <li>
 <p><strong>Transform formatting requires the result type and uses the Java-aligned method name.</strong> <code>Transform.ToHumanStr(value)</code> and <code>Transform.ToHumanStrType(resultType, value)</code> are removed. Use <code>Transform.ToHumanString(resultType, value)</code> to format partition values, including timestamps with time zones.</p>
+</li>
+<li>
+<p><strong>Year partition paths are zero-padded to four digits.</strong> <code>YearTransform.ToHumanString</code> now formats years below 1000 with leading zeros, as Java and PyIceberg do, so <code>0001-01-01</code> lands in <code>ts_year=0001/</code> instead of <code>ts_year=1/</code>. New files for such partitions are written to a different directory than earlier iceberg-go releases used. Reads are unaffected because partition values come from manifests, not paths. Tooling that matches on partition paths should use the padded form.</p>
 </li>
 <li>
 <p><strong>Catalogs now require cleanup.</strong> The <code>catalog.Catalog</code> interface includes <code>Close() error</code>. Custom catalog implementations must provide <code>Close</code>, and callers should close catalog instances after use. <code>catalog.Closer</code> is removed. Replace <code>cat.(catalog.Closer)</code> checks with <code>defer cat.Close()</code>; <code>catalog.Catalog</code> already implements <code>io.Closer</code>, so no type assertion is needed.</p>
